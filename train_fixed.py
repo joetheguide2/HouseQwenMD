@@ -13,7 +13,7 @@ import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 max_seq_length = 8192
-lora_rank = 32
+lora_rank = 64
 
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name="unsloth/Qwen2.5-1.5B-Instruct",
@@ -73,7 +73,7 @@ trainer = SFTTrainer(
         per_device_train_batch_size=1,
         gradient_accumulation_steps=16,
         warmup_ratio=0.01,
-        num_train_epochs=6,
+        num_train_epochs=5,
         learning_rate=2e-5,
         logging_steps=50,
         optim="paged_adamw_8bit",

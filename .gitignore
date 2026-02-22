@@ -12,3 +12,4 @@ train1.csv
 train1_with_json.csv
 train3.csv
 checklen.py
+finetuned_lora_2_64
