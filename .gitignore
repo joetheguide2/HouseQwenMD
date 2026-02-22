@@ -11,6 +11,4 @@ train2.csv
 train1.csv
 train1_with_json.csv
 train3.csv
-jsonput.py
-merge.py
 checklen.py
