@@ -13,3 +13,5 @@ train1_with_json.csv
 train3.csv
 checklen.py
 finetuned_lora_2_64
+.~lock.Evaluation.csv#
+clinical_notes_diagnosis_prediction_5000.csv

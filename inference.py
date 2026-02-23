@@ -43,7 +43,7 @@ SYSTEM_PROMPT = "You are a medical diagnostic expert who specializes in rare dis
 
 # --- Generation parameters ---
 GEN_KWARGS = {
-    "max_new_tokens": 1024,
+    "max_new_tokens": 2048,
     "temperature": 0.6,
     "top_p": 0.9,
     "do_sample": True,
