@@ -13,7 +13,7 @@ from unsloth.chat_templates import get_chat_template
 
 # -------------------- Configuration --------------------
 CSV_PATH = "Evaluation.csv"               # path to your CSV file
-SAMPLE_SIZE = 1000
+SAMPLE_SIZE = 6000
 RANDOM_SEED = 42
 SYSTEM_PROMPT = "You are a medical diagnostic expert who specializes in rare diseases."
 MAX_SEQ_LENGTH = 4096
@@ -145,7 +145,7 @@ print("Loading fine‑tuned model (./finetuned_lora)...")
 ft_model, ft_tokenizer = FastLanguageModel.from_pretrained(
     model_name="./finetuned_lora",
     max_seq_length=MAX_SEQ_LENGTH,
-    load_in_4bit=False,         # as in your original script
+    load_in_4bit=True,         # as in your original script
     fast_inference=False,
     max_lora_rank=LORA_RANK,
 )
