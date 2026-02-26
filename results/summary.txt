@@ -1,0 +1,15 @@
+EVALUATION SUMMARY
+==================================================
+Total cases evaluated: 1742
+Unique diseases: 1012
+Base model accuracy: 17.22%
+Fine‑tuned model accuracy: 20.38%
+Fine‑tuned </think> tag presence: 99.77%
+Fine‑tuned <diagnose> tag presence: 99.77%
+
+Macro‑average recall (unweighted): Base = 16.55%, FT = 19.52%
+Weighted average recall (by cases): Base = 17.22%, FT = 20.38%
+
+Diseases where Base > FT: 37
+Diseases where FT > Base: 92
+Diseases where Tie:       883

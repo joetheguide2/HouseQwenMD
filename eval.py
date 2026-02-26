@@ -45,7 +45,7 @@ df = pd.read_csv(CSV_PATH)
 # Ensure required columns exist
 assert 'CaseSummary' in df.columns and 'Disease' in df.columns, "CSV must contain 'CaseSummary' and 'Disease' columns"
 # Sample 1000 rows
-df_sample = df.sample(n=min(SAMPLE_SIZE, len(df)), random_state=RANDOM_SEED).reset_index(drop=True)
+df_sample = df
 print(f"Sampled {len(df_sample)} cases for evaluation.")
 
 # -------------------- Helper functions --------------------
