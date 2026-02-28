@@ -2,6 +2,7 @@ import os
 import gc
 import re
 import random
+import ast
 import numpy as np
 import pandas as pd
 import torch
@@ -13,11 +14,12 @@ from unsloth.chat_templates import get_chat_template
 
 # -------------------- Configuration --------------------
 CSV_PATH = "Evaluation.csv"               # path to your CSV file
-SAMPLE_SIZE = 6000
+SAMPLE_SIZE = None                         # set to None to use all rows
 RANDOM_SEED = 42
 SYSTEM_PROMPT = "You are a medical diagnostic expert who specializes in rare diseases."
-MAX_SEQ_LENGTH = 4096
+MAX_SEQ_LENGTH = 8192
 LORA_RANK = 64
+BATCH_SIZE = 1                              # number of cases processed in parallel
 
 # Generation parameters (identical to your interactive script)
 GEN_KWARGS = {
@@ -26,12 +28,19 @@ GEN_KWARGS = {
     "top_p": 0.9,
     "do_sample": True,
     "use_cache": True,
-    "pad_token_id": None,   # will be set after tokenizer is loaded
+    # pad_token_id is now handled via tokenizer.pad_token
 }
 
-OUTPUT_CSV = "evaluation_results.csv"
-PLOT_ACCURACY = "accuracy_comparison.png"
-PLOT_TAGS = "tag_presence.png"
+# Output directory
+OUTPUT_DIR = "eval_results"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Paths for continuous saving
+BASE_CSV = os.path.join(OUTPUT_DIR, "base_results.csv")
+FT_CSV   = os.path.join(OUTPUT_DIR, "ft_results.csv")
+OUTPUT_CSV = os.path.join(OUTPUT_DIR, "evaluation_results.csv")
+PLOT_ACCURACY = os.path.join(OUTPUT_DIR, "accuracy_comparison.png")
+PLOT_TAGS = os.path.join(OUTPUT_DIR, "tag_presence.png")
 
 # Set seeds for reproducibility
 random.seed(RANDOM_SEED)
@@ -42,11 +51,12 @@ if torch.cuda.is_available():
 
 # -------------------- Load and sample data --------------------
 df = pd.read_csv(CSV_PATH)
-# Ensure required columns exist
-assert 'CaseSummary' in df.columns and 'Disease' in df.columns, "CSV must contain 'CaseSummary' and 'Disease' columns"
-# Sample 1000 rows
-df_sample = df
-print(f"Sampled {len(df_sample)} cases for evaluation.")
+assert 'CaseSummary' in df.columns and 'Disease' in df.columns, \
+    "CSV must contain 'CaseSummary' and 'Disease' columns"
+
+if SAMPLE_SIZE and len(df) > SAMPLE_SIZE:
+    df = df.sample(n=SAMPLE_SIZE, random_state=RANDOM_SEED)
+print(f"Using {len(df)} cases for evaluation.")
 
 # -------------------- Helper functions --------------------
 def parse_synonyms(syn_str):
@@ -65,102 +75,242 @@ def disease_in_response(response, disease, synonyms):
             return True
     return False
 
-def get_response(model, tokenizer, case_summary):
-    """Generate a diagnosis for a single case summary."""
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Look at the patient case and diagnose them. Case Summary : {case_summary}"}
-    ]
-    inputs = tokenizer.apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        return_tensors="pt",
-        return_dict=True
-    ).to(model.device)
-    with torch.no_grad():
-        outputs = model.generate(**inputs, **GEN_KWARGS)
-    response = tokenizer.decode(
-        outputs[0][inputs["input_ids"].shape[1]:],
-        skip_special_tokens=True
-    ).strip()
-    return response
-
-def evaluate_model(model, tokenizer, df, model_name):
-    """Run evaluation on the sampled dataframe and return list of result dicts."""
+def load_results_from_csv(csv_path):
+    """
+    Read a CSV saved by evaluate_model and convert it back to a list of result dictionaries.
+    Handles the 'synonyms' column which was stored as a string representation of a list.
+    """
+    df_csv = pd.read_csv(csv_path)
     results = []
-    for idx, row in tqdm(df.iterrows(), total=len(df), desc=f"Evaluating {model_name}"):
-        case = row['CaseSummary']
-        true_disease = row['Disease']
-        synonyms = parse_synonyms(row.get('Synonyms', ''))  # column might be missing
+    for _, row in df_csv.iterrows():
+        # Convert the string representation of list back to a Python list
         try:
-            response = get_response(model, tokenizer, case)
-        except Exception as e:
-            print(f"Error on case {idx}: {e}")
-            response = ""
-        correct = disease_in_response(response, true_disease, synonyms)
-        # For fine‑tuned model, check for tags
-        has_think = "</think>" in response
-        has_diagnose = "<diagnose>" in response   # note: in your example they used <diagnose> without closing?
-        # The original instruction said <diagnose> tag, but the example used <diagnosis>. We'll check both?
-        # Actually the user wrote: "tag presence of </think> and <diagnose>". We'll check exactly those strings.
-        # In the first two examples, the model output <diagnosis>... maybe it's a typo. We'll check both to be safe.
-        if not has_diagnose:
-            has_diagnose = "<diagnosis>" in response  # fallback
+            synonyms = ast.literal_eval(row['synonyms']) if pd.notna(row['synonyms']) else []
+        except (SyntaxError, ValueError):
+            synonyms = []   # fallback
         results.append({
-            'case_idx': idx,
-            'true_disease': true_disease,
+            'case_idx': row['case_idx'],
+            'true_disease': row['true_disease'],
             'synonyms': synonyms,
-            'response': response,
-            'correct': correct,
-            'has_think': has_think,
-            'has_diagnose': has_diagnose,
+            'response': row['response'],
+            'correct': bool(row['correct']),
+            'has_think': bool(row['has_think']),
+            'has_diagnose': bool(row['has_diagnose']),
         })
     return results
 
-# -------------------- Load base model --------------------
-print("\n" + "="*50)
-print("Loading base model (unsloth/Qwen2.5-1.5B-Instruct)...")
-base_model, base_tokenizer = FastLanguageModel.from_pretrained(
-    model_name="unsloth/Qwen2.5-1.5B-Instruct",
-    max_seq_length=MAX_SEQ_LENGTH,
-    load_in_4bit=False,          # use 4‑bit to save memory (optional, can set False)
-    fast_inference=False,
-)
-base_model = FastLanguageModel.for_inference(base_model)
-base_tokenizer = get_chat_template(base_tokenizer, chat_template="qwen2.5")
-GEN_KWARGS["pad_token_id"] = base_tokenizer.eos_token_id
-base_model.to("cuda" if torch.cuda.is_available() else "cpu")
+# Batched evaluation function with continuous saving and resume support
+def evaluate_model(model, tokenizer, df, model_name, batch_size=BATCH_SIZE,
+                   output_csv=None, overwrite=True):
+    """
+    Run batched evaluation on the dataframe.
+    If output_csv is provided, results are appended to that CSV file after each batch.
+    - overwrite=True:  if output_csv exists, it is deleted at the start.
+    - overwrite=False: existing file is kept and new results are appended.
+    Returns the full list of results for the processed data.
+    """
+    results = []
 
-# Evaluate base model
-base_results = evaluate_model(base_model, base_tokenizer, df_sample, "Base Model")
+    # Handle existing CSV file according to overwrite flag
+    if output_csv:
+        if overwrite and os.path.exists(output_csv):
+            os.remove(output_csv)
+            print(f"  (Existing {output_csv} removed, starting fresh)")
+        # If not overwriting, we keep the file and will append later.
 
-# Clear memory
-del base_model, base_tokenizer
-gc.collect()
-torch.cuda.empty_cache()
+    # Prepare tokenizer for batched generation
+    tokenizer.padding_side = "left"          # important for decoder‑only models
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
-# -------------------- Load fine‑tuned model --------------------
-print("\n" + "="*50)
-print("Loading fine‑tuned model (./finetuned_lora)...")
-ft_model, ft_tokenizer = FastLanguageModel.from_pretrained(
-    model_name="./finetuned_lora",
-    max_seq_length=MAX_SEQ_LENGTH,
-    load_in_4bit=True,         # as in your original script
-    fast_inference=False,
-    max_lora_rank=LORA_RANK,
-)
-ft_model = FastLanguageModel.for_inference(ft_model)
-ft_tokenizer = get_chat_template(ft_tokenizer, chat_template="qwen2.5")
-GEN_KWARGS["pad_token_id"] = ft_tokenizer.eos_token_id
-ft_model.to("cuda" if torch.cuda.is_available() else "cpu")
+    # Process in batches
+    for i in tqdm(range(0, len(df), batch_size), desc=f"Evaluating {model_name}"):
+        batch_df = df.iloc[i:i+batch_size]
+        prompts = []
+        indices = []
 
-# Evaluate fine‑tuned model
-ft_results = evaluate_model(ft_model, ft_tokenizer, df_sample, "Fine‑tuned Model")
+        # Build prompts for the batch
+        for idx, row in batch_df.iterrows():
+            case = row['CaseSummary']
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"Look at the patient case and diagnose them. Case Summary : {case}"}
+            ]
+            # Get the full prompt string (without tokenizing yet)
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=False
+            )
+            prompts.append(prompt)
+            indices.append(idx)
 
-# Clear memory
-del ft_model, ft_tokenizer
-gc.collect()
-torch.cuda.empty_cache()
+        # Tokenize the batch with padding and truncation
+        inputs = tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=MAX_SEQ_LENGTH
+        ).to(model.device)
+
+        # Generate
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                **GEN_KWARGS
+            )
+
+        # Decode only the newly generated tokens (skip the input prompt)
+        generated_ids = outputs[:, inputs['input_ids'].shape[1]:]
+        responses = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+
+        # Store results for each case in the batch
+        batch_results = []
+        for j, idx in enumerate(indices):
+            row = df.loc[idx]
+            true_disease = row['Disease']
+            synonyms = parse_synonyms(row.get('Synonyms', ''))
+            response = responses[j].strip()
+            correct = disease_in_response(response, true_disease, synonyms)
+            has_think = "</think>" in response
+            has_diagnose = "<diagnose>" in response or "<diagnosis>" in response   # fallback
+            res = {
+                'case_idx': idx,
+                'true_disease': true_disease,
+                'synonyms': synonyms,
+                'response': response,
+                'correct': correct,
+                'has_think': has_think,
+                'has_diagnose': has_diagnose,
+            }
+            batch_results.append(res)
+            results.append(res)
+
+        # --- Continuous saving: append this batch to CSV ---
+        if output_csv:
+            batch_df = pd.DataFrame(batch_results)
+            # Write header only if file does not exist yet (first batch ever)
+            header = not os.path.exists(output_csv)
+            batch_df.to_csv(output_csv, mode='a', header=header, index=False)
+
+    return results
+
+# -------------------- Base Model Evaluation (with resume logic) --------------------
+base_results = None
+base_model_loaded = False
+
+if os.path.exists(BASE_CSV):
+    existing_df = pd.read_csv(BASE_CSV)
+    if len(existing_df) == len(df):
+        print("\n" + "="*50)
+        print("Base model results already complete. Loading from CSV.")
+        base_results = load_results_from_csv(BASE_CSV)
+    else:
+        print("\n" + "="*50)
+        print(f"Base model results partial ({len(existing_df)}/{len(df)}). Evaluating remaining cases.")
+        processed_indices = set(existing_df['case_idx'])
+        remaining_df = df[~df.index.isin(processed_indices)]
+
+        # Load base model
+        print("Loading base model (unsloth/Qwen2.5-1.5B-Instruct) in 4‑bit...")
+        base_model, base_tokenizer = FastLanguageModel.from_pretrained(
+            model_name="unsloth/Qwen2.5-1.5B-Instruct",
+            max_seq_length=MAX_SEQ_LENGTH,
+            load_in_4bit=True,
+            fast_inference=True,
+        )
+        base_model = FastLanguageModel.for_inference(base_model)
+        base_tokenizer = get_chat_template(base_tokenizer, chat_template="qwen2.5")
+        base_model_loaded = True
+
+        # Evaluate remaining cases (append to existing CSV)
+        _ = evaluate_model(base_model, base_tokenizer, remaining_df,
+                           "Base Model (resume)", output_csv=BASE_CSV, overwrite=False)
+
+        # After completion, load full results from CSV
+        base_results = load_results_from_csv(BASE_CSV)
+else:
+    print("\n" + "="*50)
+    print("No base results found. Evaluating full set.")
+    print("Loading base model (unsloth/Qwen2.5-1.5B-Instruct) in 4‑bit...")
+    base_model, base_tokenizer = FastLanguageModel.from_pretrained(
+        model_name="unsloth/Qwen2.5-1.5B-Instruct",
+        max_seq_length=MAX_SEQ_LENGTH,
+        load_in_4bit=True,
+        fast_inference=True,
+    )
+    base_model = FastLanguageModel.for_inference(base_model)
+    base_tokenizer = get_chat_template(base_tokenizer, chat_template="qwen2.5")
+    base_model_loaded = True
+
+    base_results = evaluate_model(base_model, base_tokenizer, df,
+                                  "Base Model", output_csv=BASE_CSV, overwrite=True)
+
+# Clean up base model if it was loaded
+if base_model_loaded:
+    del base_model, base_tokenizer
+    gc.collect()
+    torch.cuda.empty_cache()
+
+# -------------------- Fine‑tuned Model Evaluation (with resume logic) --------------------
+ft_results = None
+ft_model_loaded = False
+
+if os.path.exists(FT_CSV):
+    existing_df = pd.read_csv(FT_CSV)
+    if len(existing_df) == len(df):
+        print("\n" + "="*50)
+        print("Fine‑tuned model results already complete. Loading from CSV.")
+        ft_results = load_results_from_csv(FT_CSV)
+    else:
+        print("\n" + "="*50)
+        print(f"Fine‑tuned model results partial ({len(existing_df)}/{len(df)}). Evaluating remaining cases.")
+        processed_indices = set(existing_df['case_idx'])
+        remaining_df = df[~df.index.isin(processed_indices)]
+
+        # Load fine‑tuned model
+        print("Loading fine‑tuned model (./finetuned_lora) in 4‑bit...")
+        ft_model, ft_tokenizer = FastLanguageModel.from_pretrained(
+            model_name="./finetuned_lora",
+            max_seq_length=MAX_SEQ_LENGTH,
+            load_in_4bit=True,
+            fast_inference=False,
+            max_lora_rank=LORA_RANK,
+        )
+        ft_model = FastLanguageModel.for_inference(ft_model)
+        ft_tokenizer = get_chat_template(ft_tokenizer, chat_template="qwen2.5")
+        ft_model_loaded = True
+
+        # Evaluate remaining cases (append to existing CSV)
+        _ = evaluate_model(ft_model, ft_tokenizer, remaining_df,
+                           "Fine‑tuned Model (resume)", output_csv=FT_CSV, overwrite=False)
+
+        # After completion, load full results from CSV
+        ft_results = load_results_from_csv(FT_CSV)
+else:
+    print("\n" + "="*50)
+    print("No fine‑tuned results found. Evaluating full set.")
+    print("Loading fine‑tuned model (./finetuned_lora) in 4‑bit...")
+    ft_model, ft_tokenizer = FastLanguageModel.from_pretrained(
+        model_name="./finetuned_lora",
+        max_seq_length=MAX_SEQ_LENGTH,
+        load_in_4bit=True,
+        fast_inference=False,
+        max_lora_rank=LORA_RANK,
+    )
+    ft_model = FastLanguageModel.for_inference(ft_model)
+    ft_tokenizer = get_chat_template(ft_tokenizer, chat_template="qwen2.5")
+    ft_model_loaded = True
+
+    ft_results = evaluate_model(ft_model, ft_tokenizer, df,
+                                "Fine‑tuned Model", output_csv=FT_CSV, overwrite=True)
+
+# Clean up fine‑tuned model if it was loaded
+if ft_model_loaded:
+    del ft_model, ft_tokenizer
+    gc.collect()
+    torch.cuda.empty_cache()
 
 # -------------------- Combine and analyze results --------------------
 # Convert results to DataFrames
@@ -184,9 +334,10 @@ print(f"Fine‑tuned model accuracy: {ft_acc*100:.2f}%")
 print(f"Fine‑tuned </think> tag:   {ft_think_pct:.2f}%")
 print(f"Fine‑tuned <diagnose> tag: {ft_diagnose_pct:.2f}%")
 
-# Save detailed results to CSV
+# Save detailed results to CSV (final combined file)
 results_df.to_csv(OUTPUT_CSV, index=False)
 print(f"\nDetailed results saved to {OUTPUT_CSV}")
+print(f"(Per‑model raw results are also available in {BASE_CSV} and {FT_CSV})")
 
 # -------------------- Generate plots --------------------
 sns.set_style("whitegrid")

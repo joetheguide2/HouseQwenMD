@@ -5,7 +5,7 @@ import json
 SYSTEM_PROMPT = "You are a medical diagnostic expert who specializes in rare diseases."
 INPUT_FILE1 = "train1.csv"
 INPUT_FILE2 = "train3.csv"
-OUTPUT_FILE = "merged_final.csv"
+OUTPUT_FILE = "merged_only_disease.csv"
 
 # --- Process train1.csv ---
 df1 = pd.read_csv(INPUT_FILE1)
@@ -14,7 +14,7 @@ def create_messages_from_row(row):
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": f"Look at the patient case and diagnose him. Case summary : {row['CaseSummary']}"},
-        {"role": "assistant", "content": row['CoT']}
+        {"role": "assistant", "content": "The evidences suggest that the patient has: <diagnosis>"+row['Disease']+"</diagnosis>"}
     ]
     return json.dumps(messages, ensure_ascii=False)
 
