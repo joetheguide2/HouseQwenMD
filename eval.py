@@ -14,7 +14,7 @@ from unsloth.chat_templates import get_chat_template
 
 # -------------------- Configuration --------------------
 CSV_PATH = "Evaluation.csv"               # path to your CSV file
-SAMPLE_SIZE = None                         # set to None to use all rows
+SAMPLE_SIZE = None                   # set to None to use all rows
 RANDOM_SEED = 42
 SYSTEM_PROMPT = "You are a medical diagnostic expert who specializes in rare diseases."
 MAX_SEQ_LENGTH = 8192
@@ -32,7 +32,7 @@ GEN_KWARGS = {
 }
 
 # Output directory
-OUTPUT_DIR = "eval_results"
+OUTPUT_DIR = "eval_results_no_cot"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Paths for continuous saving
@@ -218,7 +218,7 @@ if os.path.exists(BASE_CSV):
             model_name="unsloth/Qwen2.5-1.5B-Instruct",
             max_seq_length=MAX_SEQ_LENGTH,
             load_in_4bit=True,
-            fast_inference=True,
+            fast_inference=False,
         )
         base_model = FastLanguageModel.for_inference(base_model)
         base_tokenizer = get_chat_template(base_tokenizer, chat_template="qwen2.5")
@@ -238,7 +238,7 @@ else:
         model_name="unsloth/Qwen2.5-1.5B-Instruct",
         max_seq_length=MAX_SEQ_LENGTH,
         load_in_4bit=True,
-        fast_inference=True,
+        fast_inference=False,
     )
     base_model = FastLanguageModel.for_inference(base_model)
     base_tokenizer = get_chat_template(base_tokenizer, chat_template="qwen2.5")

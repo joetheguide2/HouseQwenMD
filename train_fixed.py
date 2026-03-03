@@ -38,7 +38,7 @@ model = FastLanguageModel.get_peft_model(
     random_state=42,
 )
 
-df = pd.read_csv("./merged_final.csv")
+df = pd.read_csv("./merged_only_disease.csv")
 df['messages'] = df['messages'].apply(json.loads)
 
 tokenizer = get_chat_template(tokenizer, chat_template="qwen2.5")
