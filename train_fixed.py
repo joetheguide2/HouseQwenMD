@@ -13,7 +13,7 @@ import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 max_seq_length = 8192
-lora_rank = 64
+lora_rank = 16
 
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name="unsloth/Qwen2.5-1.5B-Instruct",
@@ -31,7 +31,7 @@ model = FastLanguageModel.get_peft_model(
     r=lora_rank,
     target_modules=[
         "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj",
+        # "gate_proj", "up_proj", "down_proj",
     ],
     lora_alpha=lora_rank * 2,
     use_gradient_checkpointing="unsloth",
@@ -75,7 +75,7 @@ trainer = SFTTrainer(
         warmup_ratio=0.01,
         num_train_epochs=5,
         learning_rate=2e-5,
-        logging_steps=50,
+        logging_steps=1,
         optim="paged_adamw_8bit",
         weight_decay=0.001,
         lr_scheduler_type="linear",
@@ -89,6 +89,27 @@ trainer = SFTTrainer(
 )
 
 trainer.train()
+
+import matplotlib.pyplot as plt
+
+# Get the log history
+log_history = trainer.state.log_history
+
+# Filter entries that contain training loss
+train_losses = [entry['loss'] for entry in log_history if 'loss' in entry]
+steps = [entry['step'] for entry in log_history if 'loss' in entry]
+
+# Plot
+plt.figure(figsize=(10, 5))
+plt.plot(steps, train_losses, label='Training Loss')
+plt.xlabel('Step')
+plt.ylabel('Loss')
+plt.title('Training Loss Curve')
+plt.legend()
+plt.grid(True)
+
+plt.savefig('loss_curve.png', dpi=300, bbox_inches='tight')
+plt.show()
 
 model.save_pretrained("finetuned_lora")
 tokenizer.save_pretrained("finetuned_lora")

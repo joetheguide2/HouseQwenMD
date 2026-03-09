@@ -1,0 +1,54 @@
+import pandas as pd
+import numpy as np
+
+# Load the CSV file
+df = pd.read_csv('Evaluation(1).csv')
+
+# Initialize a list to store correctness for each row
+correct = []
+
+# Iterate over each row
+for idx, row in df.iterrows():
+    # Get the disease name (handle potential NaN)
+    disease = row.get('Disease')
+    if pd.isna(disease):
+        disease = ''
+    else:
+        disease = str(disease).strip()
+    
+    # Get synonyms, split by ';', and clean each synonym
+    synonyms_raw = row.get('Synonyms')
+    synonyms = []
+    if not pd.isna(synonyms_raw):
+        synonyms = [s.strip() for s in str(synonyms_raw).split(';') if s.strip()]
+    
+    # Get CoT text (handle NaN)
+    cot = row.get('CoT')
+    if pd.isna(cot):
+        cot = ''
+    else:
+        cot = str(cot).lower()  # convert to lower case for case-insensitive matching
+    
+    # Check if disease (case-insensitive) is in CoT
+    disease_found = False
+    if disease and disease.lower() in cot:
+        disease_found = True
+    
+    # Check if any synonym (case-insensitive) is in CoT
+    synonym_found = False
+    for syn in synonyms:
+        if syn.lower() in cot:
+            synonym_found = True
+            break
+    
+    # If either disease or a synonym is found, mark as correct
+    correct.append(disease_found or synonym_found)
+
+# Calculate accuracy
+total = len(df)
+correct_count = sum(correct)
+accuracy = correct_count / total if total > 0 else 0
+
+print(f"Total samples: {total}")
+print(f"Correct predictions: {correct_count}")
+print(f"Accuracy: {accuracy:.2%}")

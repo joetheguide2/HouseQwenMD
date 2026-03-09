@@ -1,0 +1,82 @@
+import pandas as pd
+import json
+import os
+
+# ----------------------------------------------------------------------
+# List of all CSV files (from the image)
+# ----------------------------------------------------------------------
+df = pd.read_csv("./ft6.csv")
+
+import re
+import pandas as pd
+
+# ----------------------------------------------------------------------
+# Helper: extract text inside <diagnosis> tags
+# ----------------------------------------------------------------------
+def extract_diagnosis_content(cot):
+    if pd.isna(cot):
+        return None
+    match = re.search(r'<diagnosis>(.*?)</diagnosis>', cot, flags=re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return None
+
+# ----------------------------------------------------------------------
+# Helper: check if diagnosis content contains disease or any synonym
+# ----------------------------------------------------------------------
+def diagnosis_contains_disease_or_synonym(content, disease, synonyms_str):
+    if not content:
+        return False
+    # Normalize content (lowercase for case‑insensitive matching)
+    content_lower = content.lower()
+    
+    # Check disease
+    if pd.notna(disease) and disease.lower() in content_lower:
+        return True
+    
+    # Check synonyms
+    if pd.notna(synonyms_str):
+        synonyms = [syn.strip().lower() for syn in synonyms_str.split(',') if syn.strip()]
+        for syn in synonyms:
+            if syn in content_lower:
+                return True
+    return False
+
+# ----------------------------------------------------------------------
+# Compute statistics
+# ----------------------------------------------------------------------
+total_rows = len(df)
+
+# 1. Tag presence
+df['diag_content'] = df['CoT'].apply(extract_diagnosis_content)
+rows_with_tag = df['diag_content'].notna().sum()
+pct_tag = (rows_with_tag / total_rows) * 100 if total_rows > 0 else 0
+
+# 2. Correctness among those with tags
+def correctness_check(row):
+    if pd.isna(row['diag_content']):
+        return False
+    return diagnosis_contains_disease_or_synonym(
+        row['diag_content'],
+        row.get('Disease'),
+        row.get('Synonyms')
+    )
+
+df['is_correct'] = df.apply(correctness_check, axis=1)
+correct_among_tagged = df[df['diag_content'].notna()]['is_correct'].sum()
+pct_correct_among_tagged = (correct_among_tagged / rows_with_tag) * 100 if rows_with_tag > 0 else 0
+
+# 3. Overall correct (tag present and content correct)
+overall_correct = df['is_correct'].sum()
+pct_overall_correct = (overall_correct / total_rows) * 100 if total_rows > 0 else 0
+
+# ----------------------------------------------------------------------
+# Print summary
+# ----------------------------------------------------------------------
+print("\n=== Diagnosis Tag Analysis ===\n")
+print(f"Total rows in dataset: {total_rows}")
+print(f"Rows with <diagnosis> tags: {rows_with_tag} ({pct_tag:.2f}%)")
+print(f"Rows where diagnosis content contains Disease/Synonym (among tagged): {correct_among_tagged} ({pct_correct_among_tagged:.2f}%)")
+print(f"Overall rows that are correct (tag present + content correct): {overall_correct} ({pct_overall_correct:.2f}%)")
+
+print(df.info())
