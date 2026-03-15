@@ -12,8 +12,8 @@ from unsloth.chat_templates import get_chat_template
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
-max_seq_length = 8192
-lora_rank = 16
+max_seq_length = 4096
+lora_rank = 64
 
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name="unsloth/Qwen2.5-1.5B-Instruct",
@@ -31,15 +31,15 @@ model = FastLanguageModel.get_peft_model(
     r=lora_rank,
     target_modules=[
         "q_proj", "k_proj", "v_proj", "o_proj",
-        # "gate_proj", "up_proj", "down_proj",
+        "gate_proj", "up_proj", "down_proj",
     ],
     lora_alpha=lora_rank * 2,
     use_gradient_checkpointing="unsloth",
     random_state=42,
 )
 
-df = pd.read_csv("./merged_only_disease.csv")
-df['messages'] = df['messages'].apply(json.loads)
+df = pd.read_parquet("./cleaned_train.parquet")
+df['messages'] = df['json'].apply(json.loads)
 
 tokenizer = get_chat_template(tokenizer, chat_template="qwen2.5")
 
@@ -70,8 +70,8 @@ trainer = SFTTrainer(
         output_dir="./checkpoints", 
         max_seq_length=max_seq_length,      
         dataset_text_field="text",
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=16,
+        per_device_train_batch_size=2,
+        gradient_accumulation_steps=8,
         warmup_ratio=0.01,
         num_train_epochs=5,
         learning_rate=2e-5,
@@ -81,35 +81,37 @@ trainer = SFTTrainer(
         lr_scheduler_type="linear",
         seed=3407,
         packing = True,
-        report_to="none",
+        report_to="tensorboard",
         gradient_checkpointing= "unsloth",
-        save_strategy="epoch",               
-        save_total_limit=2,   
+        save_strategy="steps",
+        save_steps= 50,
+        save_total_limit=2,
+        logging_dir= "./runs"
     ),
 )
 
 trainer.train()
 
-import matplotlib.pyplot as plt
-
-# Get the log history
-log_history = trainer.state.log_history
-
-# Filter entries that contain training loss
-train_losses = [entry['loss'] for entry in log_history if 'loss' in entry]
-steps = [entry['step'] for entry in log_history if 'loss' in entry]
-
-# Plot
-plt.figure(figsize=(10, 5))
-plt.plot(steps, train_losses, label='Training Loss')
-plt.xlabel('Step')
-plt.ylabel('Loss')
-plt.title('Training Loss Curve')
-plt.legend()
-plt.grid(True)
-
-plt.savefig('loss_curve.png', dpi=300, bbox_inches='tight')
-plt.show()
+# import matplotlib.pyplot as plt
+#
+# # Get the log history
+# log_history = trainer.state.log_history
+#
+# # Filter entries that contain training loss
+# train_losses = [entry['loss'] for entry in log_history if 'loss' in entry]
+# steps = [entry['step'] for entry in log_history if 'loss' in entry]
+#
+# # Plot
+# plt.figure(figsize=(10, 5))
+# plt.plot(steps, train_losses, label='Training Loss')
+# plt.xlabel('Step')
+# plt.ylabel('Loss')
+# plt.title('Training Loss Curve')
+# plt.legend()
+# plt.grid(True)
+#
+# plt.savefig('loss_curve.png', dpi=300, bbox_inches='tight')
+# plt.show()
 
 model.save_pretrained("finetuned_lora")
 tokenizer.save_pretrained("finetuned_lora")

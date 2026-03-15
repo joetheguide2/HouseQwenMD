@@ -1,0 +1,253 @@
+import pandas as pd
+import re
+import json
+import os
+
+# =============================================================================
+# 1. Load and concatenate all CSV files (excluding backups)
+# =============================================================================
+all_files = [
+    "Train1.backup.csv",
+    "Train1.csv",
+    "train2.csv",
+    "train3.csv",
+    "Trainprev.csv",
+    "Twofold1.csv",
+    "Twofold2.csv",
+    "Twofold3.csv",
+    "Twofold4.csv"
+]
+
+files_to_read = [f for f in all_files if "backup" not in f.lower()]
+
+df_list = []
+for file in files_to_read:
+    if not os.path.exists(file):
+        print(f"⚠️  Warning: {file} not found, skipping.")
+        continue
+    try:
+        temp = pd.read_csv(file)
+        # Ensure required columns exist
+        for col in ["CoT", "Disease", "Synonyms", "CaseSummary"]:
+            if col not in temp.columns:
+                temp[col] = None
+        df_list.append(temp)
+        print(f"✅ Loaded {file} with {len(temp)} rows.")
+    except Exception as e:
+        print(f"❌ Error reading {file}: {e}")
+
+if not df_list:
+    raise RuntimeError("No CSV files could be loaded.")
+
+df_raw = pd.concat(df_list, ignore_index=True)
+print(f"\n📊 Total rows after concatenation: {len(df_raw)}")
+
+# =============================================================================
+# 2. Create BASE dataset: drop duplicates on CaseSummary and rows with null CoT
+# =============================================================================
+df_base = df_raw.drop_duplicates(subset=["CaseSummary"], keep="first").copy()
+df_base = df_base.dropna(subset=["CoT"]).reset_index(drop=True)
+
+print(f"\n📌 BASE dataset: {len(df_base)} rows (after dedup + non‑null CoT)")
+
+# =============================================================================
+# 3. Helper functions for cleaning and checking
+# =============================================================================
+def extract_diagnosis_content(cot):
+    """Return text between <diagnosis> tags, or None."""
+    if pd.isna(cot):
+        return None
+    match = re.search(r'<diagnosis>(.*?)</diagnosis>', cot, flags=re.DOTALL | re.IGNORECASE)
+    return match.group(1).strip() if match else None
+
+def contains_disease_or_synonym(text, disease, synonyms_str):
+    """Case‑insensitive check if text contains disease or any synonym."""
+    if pd.isna(text):
+        return False
+    text_low = text.lower()
+    if pd.notna(disease) and disease.lower() in text_low:
+        return True
+    if pd.notna(synonyms_str):
+        for syn in synonyms_str.split(','):
+            syn = syn.strip()
+            if syn and syn.lower() in text_low:
+                return True
+    return False
+
+def remove_sentences_with_terms(text, terms):
+    """
+    Remove any sentence that contains any of the terms (case‑insensitive).
+    Returns cleaned text; if no change, returns original.
+    """
+    if pd.isna(text) or not terms:
+        return text
+    # Escape regex metacharacters
+    escaped = [re.escape(term) for term in terms if term]
+    if not escaped:
+        return text
+    pattern = re.compile('|'.join(escaped), re.IGNORECASE)
+    # Simple sentence split (on .!? followed by space or end)
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    cleaned = [s for s in sentences if not pattern.search(s)]
+    if len(cleaned) == len(sentences):
+        return text
+    return ' '.join(cleaned)
+
+def build_messages(row):
+    """Create HuggingFace‑style messages JSON."""
+    system = "You are a medical diagnostic expert."
+    user = f"Look at the patient case summary and diagnose them. Case summary: {row['CaseSummary']}"
+    assistant = row['CoT'] if pd.notna(row['CoT']) else ""
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+        {"role": "assistant", "content": assistant}
+    ]
+    return json.dumps(messages, ensure_ascii=False)
+
+# =============================================================================
+# 4. Add json column to BASE dataset (using original CaseSummary and CoT)
+# =============================================================================
+df_base['json'] = df_base.apply(build_messages, axis=1)
+
+# =============================================================================
+# 5. Apply cleaning steps to obtain CLEANED dataset
+# =============================================================================
+df_clean = df_base.copy()   # start from base (which already has json, but we'll regenerate later)
+
+# Step A: Keep rows with <diagnosis> and </diagnosis> tags
+df_clean = df_clean[
+    df_clean['CoT'].str.contains('<diagnosis>', na=False, case=False) &
+    df_clean['CoT'].str.contains('</diagnosis>', na=False, case=False)
+].copy()
+print(f"\n🔹 After tag‑presence filter: {len(df_clean)} rows")
+
+# Step B: Keep rows where diagnosis content matches disease/synonym
+def valid_diagnosis(row):
+    content = extract_diagnosis_content(row['CoT'])
+    if not content:
+        return False
+    return contains_disease_or_synonym(content, row['Disease'], row['Synonyms'])
+
+mask_valid = df_clean.apply(valid_diagnosis, axis=1)
+df_clean = df_clean[mask_valid].copy()
+print(f"🔹 After content‑correctness filter: {len(df_clean)} rows")
+
+# Step C: Remove leakage sentences from CaseSummary
+terms_for_leakage = []
+for _, row in df_clean.iterrows():
+    terms = []
+    if pd.notna(row['Disease']):
+        terms.append(row['Disease'])
+    if pd.notna(row['Synonyms']):
+        terms.extend([s.strip() for s in row['Synonyms'].split(',') if s.strip()])
+    terms_for_leakage.append(terms)
+
+df_clean['CaseSummary_original'] = df_clean['CaseSummary']  # keep for later stats
+df_clean['CaseSummary'] = [
+    remove_sentences_with_terms(cs, terms)
+    for cs, terms in zip(df_clean['CaseSummary'], terms_for_leakage)
+]
+
+# Step D: Remove sentences with "ground truth" from CoT
+df_clean['CoT_original'] = df_clean['CoT']
+df_clean['CoT'] = df_clean['CoT'].apply(
+    lambda x: remove_sentences_with_terms(x, ["ground truth"])
+)
+
+# Step E: Regenerate json column with cleaned CaseSummary and CoT
+df_clean['json'] = df_clean.apply(build_messages, axis=1)
+
+print(f"🔹 After leakage and ground‑truth removal: {len(df_clean)} rows")
+
+# =============================================================================
+# 6. Save both datasets
+# =============================================================================
+df_base.to_parquet("base.parquet", index=False)
+df_clean.to_parquet("cleaned.parquet", index=False)
+print("\n💾 Saved base.csv and cleaned.csv")
+
+# =============================================================================
+# 7. Statistics for both datasets
+# =============================================================================
+# ... (all previous code up to saving the files remains unchanged) ...
+
+# =============================================================================
+# 7. Statistics for both datasets (updated to show cleaned leakage)
+# =============================================================================
+def print_stats(df, name):
+    total = len(df)
+    print(f"\n{'='*60}")
+    print(f"📈 Statistics for {name} (n = {total})")
+    print('='*60)
+
+    # Tag presence
+    df['diag_content'] = df['CoT'].apply(extract_diagnosis_content)
+    tag_present = df['diag_content'].notna().sum()
+    pct_tag = (tag_present / total) * 100 if total else 0
+
+    # Correctness among tagged
+    def correct_tagged(row):
+        if pd.isna(row['diag_content']):
+            return False
+        return contains_disease_or_synonym(row['diag_content'], row['Disease'], row['Synonyms'])
+
+    df['correct'] = df.apply(correct_tagged, axis=1)
+    correct_tag = df[df['diag_content'].notna()]['correct'].sum()
+    pct_correct_tag = (correct_tag / tag_present) * 100 if tag_present else 0
+
+    # Overall correct
+    overall_correct = df['correct'].sum()
+    pct_overall = (overall_correct / total) * 100 if total else 0
+
+    # Leakage (original case summary contains disease/synonym)
+    if 'CaseSummary_original' in df.columns:
+        case_col_orig = 'CaseSummary_original'
+        leak_orig = df.apply(
+            lambda r: contains_disease_or_synonym(r[case_col_orig], r['Disease'], r['Synonyms']),
+            axis=1
+        )
+        leak_orig_count = leak_orig.sum()
+        pct_leak_orig = (leak_orig_count / total) * 100 if total else 0
+    else:
+        # For base dataset, there is no original column, so we use the current CaseSummary as original
+        case_col_orig = 'CaseSummary'
+        leak_orig = df.apply(
+            lambda r: contains_disease_or_synonym(r[case_col_orig], r['Disease'], r['Synonyms']),
+            axis=1
+        )
+        leak_orig_count = leak_orig.sum()
+        pct_leak_orig = (leak_orig_count / total) * 100 if total else 0
+
+    # Leakage (cleaned case summary) – only relevant for cleaned dataset
+    if 'CaseSummary_original' in df.columns:
+        leak_cleaned = df.apply(
+            lambda r: contains_disease_or_synonym(r['CaseSummary'], r['Disease'], r['Synonyms']),
+            axis=1
+        )
+        leak_cleaned_count = leak_cleaned.sum()
+        pct_leak_cleaned = (leak_cleaned_count / total) * 100 if total else 0
+    else:
+        # For base dataset, cleaned leakage is the same as original
+        leak_cleaned_count = leak_orig_count
+        pct_leak_cleaned = pct_leak_orig
+
+    # Ground truth presence in CoT
+    df['has_ground_truth'] = df['CoT'].str.contains('ground truth', na=False, case=False)
+    gt_count = df['has_ground_truth'].sum()
+    pct_gt = (gt_count / total) * 100 if total else 0
+
+    # Print
+    print(f"📌 <diagnosis> tag present        : {tag_present:6d} ({pct_tag:.2f}%)")
+    print(f"✅ Correct among tagged           : {correct_tag:6d} ({pct_correct_tag:.2f}%)")
+    print(f"🎯 Overall correct (tag+content)  : {overall_correct:6d} ({pct_overall:.2f}%)")
+    print(f"🔍 Leakage (original case summary): {leak_orig_count:6d} ({pct_leak_orig:.2f}%)")
+    if 'CaseSummary_original' in df.columns:
+        print(f"🧹 Leakage (cleaned case summary) : {leak_cleaned_count:6d} ({pct_leak_cleaned:.2f}%)")
+    print(f"⚠️  Contains 'ground truth' in CoT : {gt_count:6d} ({pct_gt:.2f}%)")
+
+    # Clean up temporary columns
+    df.drop(columns=['diag_content', 'correct', 'has_ground_truth'], inplace=True, errors='ignore')
+
+print_stats(df_base, "BASE dataset")
+print_stats(df_clean, "CLEANED dataset")

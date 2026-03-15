@@ -13,7 +13,7 @@ from unsloth import FastLanguageModel
 from unsloth.chat_templates import get_chat_template
 
 # -------------------- Configuration --------------------
-CSV_PATH = "Evaluation.csv"               # path to your CSV file
+CSV_PATH = "diff_data.csv"               # path to your CSV file
 SAMPLE_SIZE = None                   # set to None to use all rows
 RANDOM_SEED = 42
 SYSTEM_PROMPT = "You are a medical diagnostic expert who specializes in rare diseases."
@@ -85,10 +85,16 @@ def load_results_from_csv(csv_path):
     for _, row in df_csv.iterrows():
         # Convert the string representation of list back to a Python list
         try:
-            synonyms = ast.literal_eval(row['synonyms']) if pd.notna(row['synonyms']) else []
+            if "ft" in csv_path:
+                synonyms = ast.literal_eval(row['synonyms']) if pd.notna(row['synonyms']) else []
+            else:
+                synonyms = ast.literal_eval(row['base_synonyms']) if pd.notna(row['base_synonyms']) else []
+
         except (SyntaxError, ValueError):
             synonyms = []   # fallback
-        results.append({
+
+        if "ft" in csv_path:
+            results.append({
             'case_idx': row['case_idx'],
             'true_disease': row['true_disease'],
             'synonyms': synonyms,
@@ -96,6 +102,16 @@ def load_results_from_csv(csv_path):
             'correct': bool(row['correct']),
             'has_think': bool(row['has_think']),
             'has_diagnose': bool(row['has_diagnose']),
+        })
+        else:
+            results.append({
+            'case_idx': row['base_case_idx'],
+            'true_disease': row['base_true_disease'],
+            'synonyms': synonyms,
+            'response': row['base_response'],
+            'correct': bool(row['base_correct']),
+            'has_think': bool(row['base_has_think']),
+            'has_diagnose': bool(row['base_has_diagnose']),
         })
     return results
 
@@ -209,7 +225,7 @@ if os.path.exists(BASE_CSV):
     else:
         print("\n" + "="*50)
         print(f"Base model results partial ({len(existing_df)}/{len(df)}). Evaluating remaining cases.")
-        processed_indices = set(existing_df['case_idx'])
+        processed_indices = set(existing_df['base_case_idx'])
         remaining_df = df[~df.index.isin(processed_indices)]
 
         # Load base model
@@ -218,7 +234,7 @@ if os.path.exists(BASE_CSV):
             model_name="unsloth/Qwen2.5-1.5B-Instruct",
             max_seq_length=MAX_SEQ_LENGTH,
             load_in_4bit=True,
-            fast_inference=False,
+            fast_inference=True,
         )
         base_model = FastLanguageModel.for_inference(base_model)
         base_tokenizer = get_chat_template(base_tokenizer, chat_template="qwen2.5")
@@ -238,7 +254,7 @@ else:
         model_name="unsloth/Qwen2.5-1.5B-Instruct",
         max_seq_length=MAX_SEQ_LENGTH,
         load_in_4bit=True,
-        fast_inference=False,
+        fast_inference=True,
     )
     base_model = FastLanguageModel.for_inference(base_model)
     base_tokenizer = get_chat_template(base_tokenizer, chat_template="qwen2.5")
@@ -275,7 +291,7 @@ if os.path.exists(FT_CSV):
             model_name="./finetuned_lora",
             max_seq_length=MAX_SEQ_LENGTH,
             load_in_4bit=True,
-            fast_inference=False,
+            fast_inference=True,
             max_lora_rank=LORA_RANK,
         )
         ft_model = FastLanguageModel.for_inference(ft_model)
@@ -296,7 +312,7 @@ else:
         model_name="./finetuned_lora",
         max_seq_length=MAX_SEQ_LENGTH,
         load_in_4bit=True,
-        fast_inference=False,
+        fast_inference=True,
         max_lora_rank=LORA_RANK,
     )
     ft_model = FastLanguageModel.for_inference(ft_model)
