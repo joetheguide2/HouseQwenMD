@@ -13,7 +13,7 @@ from unsloth import FastLanguageModel
 from unsloth.chat_templates import get_chat_template
 
 # -------------------- Configuration --------------------
-CSV_PATH = "diff_data.csv"               # path to your CSV file
+CSV_PATH = "Eval.csv"               # path to your CSV file
 SAMPLE_SIZE = None                   # set to None to use all rows
 RANDOM_SEED = 42
 SYSTEM_PROMPT = "You are a medical diagnostic expert who specializes in rare diseases."
@@ -51,6 +51,8 @@ if torch.cuda.is_available():
 
 # -------------------- Load and sample data --------------------
 df = pd.read_csv(CSV_PATH)
+#df["CaseSummary"] = df["Clinical Notes"]
+#df["Disease"] = df["Diagnosis"]
 assert 'CaseSummary' in df.columns and 'Disease' in df.columns, \
     "CSV must contain 'CaseSummary' and 'Disease' columns"
 
@@ -88,7 +90,9 @@ def load_results_from_csv(csv_path):
             if "ft" in csv_path:
                 synonyms = ast.literal_eval(row['synonyms']) if pd.notna(row['synonyms']) else []
             else:
-                synonyms = ast.literal_eval(row['base_synonyms']) if pd.notna(row['base_synonyms']) else []
+                synonyms = ast.literal_eval(row['synonyms']) if pd.notna(row['synonyms']) else []
+
+                #synonyms = ast.literal_eval(row['base_synonyms']) if pd.notna(row['base_synonyms']) else []
 
         except (SyntaxError, ValueError):
             synonyms = []   # fallback
@@ -105,13 +109,22 @@ def load_results_from_csv(csv_path):
         })
         else:
             results.append({
-            'case_idx': row['base_case_idx'],
-            'true_disease': row['base_true_disease'],
+            'case_idx': row['case_idx'],
+            'true_disease': row['true_disease'],
             'synonyms': synonyms,
-            'response': row['base_response'],
-            'correct': bool(row['base_correct']),
-            'has_think': bool(row['base_has_think']),
-            'has_diagnose': bool(row['base_has_diagnose']),
+            'response': row['response'],
+            'correct': bool(row['correct']),
+            'has_think': bool(row['has_think']),
+            'has_diagnose': bool(row['has_diagnose']),
+
+            # results.append({
+            # 'case_idx': row['base_case_idx'],
+            # 'true_disease': row['base_true_disease'],
+            # 'synonyms': synonyms,
+            # 'response': row['base_response'],
+            # 'correct': bool(row['base_correct']),
+            # 'has_think': bool(row['base_has_think']),
+            # 'has_diagnose': bool(row['base_has_diagnose']),
         })
     return results
 
@@ -150,7 +163,7 @@ def evaluate_model(model, tokenizer, df, model_name, batch_size=BATCH_SIZE,
             case = row['CaseSummary']
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Look at the patient case and diagnose them. Case Summary : {case}"}
+                {"role": "user", "content": f"Look at the patient case and diagnose them. Output the diagnosis (Only the name of the disease) in <diagnosis></diagnosis> tags. Case Summary : {case}"}
             ]
             # Get the full prompt string (without tokenizing yet)
             prompt = tokenizer.apply_chat_template(
@@ -225,7 +238,7 @@ if os.path.exists(BASE_CSV):
     else:
         print("\n" + "="*50)
         print(f"Base model results partial ({len(existing_df)}/{len(df)}). Evaluating remaining cases.")
-        processed_indices = set(existing_df['base_case_idx'])
+        processed_indices = set(existing_df['case_idx'])
         remaining_df = df[~df.index.isin(processed_indices)]
 
         # Load base model
@@ -235,6 +248,7 @@ if os.path.exists(BASE_CSV):
             max_seq_length=MAX_SEQ_LENGTH,
             load_in_4bit=True,
             fast_inference=True,
+        local_files_only=True
         )
         base_model = FastLanguageModel.for_inference(base_model)
         base_tokenizer = get_chat_template(base_tokenizer, chat_template="qwen2.5")
@@ -255,6 +269,7 @@ else:
         max_seq_length=MAX_SEQ_LENGTH,
         load_in_4bit=True,
         fast_inference=True,
+        local_files_only=True
     )
     base_model = FastLanguageModel.for_inference(base_model)
     base_tokenizer = get_chat_template(base_tokenizer, chat_template="qwen2.5")
@@ -293,6 +308,7 @@ if os.path.exists(FT_CSV):
             load_in_4bit=True,
             fast_inference=True,
             max_lora_rank=LORA_RANK,
+        local_files_only=True
         )
         ft_model = FastLanguageModel.for_inference(ft_model)
         ft_tokenizer = get_chat_template(ft_tokenizer, chat_template="qwen2.5")
@@ -314,6 +330,7 @@ else:
         load_in_4bit=True,
         fast_inference=True,
         max_lora_rank=LORA_RANK,
+        local_files_only=True
     )
     ft_model = FastLanguageModel.for_inference(ft_model)
     ft_tokenizer = get_chat_template(ft_tokenizer, chat_template="qwen2.5")

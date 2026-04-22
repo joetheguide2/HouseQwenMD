@@ -1,0 +1,251 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import chi2, binomtest
+
+# =============================================================================
+# 1. Load data
+# =============================================================================
+df = pd.read_csv('./navyresults.csv')   # <-- replace with your file path
+df_alt = pd.read_csv('./deepseek_analysis_results.csv')
+df_one_shot = pd.read_csv('./commonv2.csv')
+df_faux_accuracy_cases = pd.read_csv('./deepseek_analysis_results.csv')
+
+# Ensure correctness columns are boolean
+df['base_correct'] = df['base_correct'].astype(bool)
+df['ft_correct'] = df_alt['ft_correct'].astype(bool)
+#df = df.loc[~ df_faux_accuracy_cases['ft_correct']]
+
+# Total number of samples
+N = len(df)
+print(f"Total samples: {N}\n")
+
+# =============================================================================
+# 2. Overall accuracy and improvement
+# =============================================================================
+base_acc = df['base_correct'].mean()
+ft_acc = df['ft_correct'].mean()
+improvement = ft_acc - base_acc
+
+print("=== Overall Accuracy ===")
+print(f"Base model:      {base_acc:.4f} ({base_acc*100:.2f}%)")
+print(f"Fine‑tuned model: {ft_acc:.4f} ({ft_acc*100:.2f}%)")
+print(f"Improvement:      {improvement:.4f} ({improvement*100:.2f} percentage points)\n")
+
+# =============================================================================
+# 3. Contingency table and McNemar's test
+# =============================================================================
+both_correct = ((df['base_correct']) & (df['ft_correct'])).sum()
+base_only = ((df['base_correct']) & (~df['ft_correct'])).sum()
+ft_only = ((~df['base_correct']) & (df['ft_correct'])).sum()
+both_wrong = ((~df['base_correct']) & (~df['ft_correct'])).sum()
+
+print("=== Contingency Table (Base vs Fine‑tuned) ===")
+print("                | FT correct | FT wrong")
+print(f"Base correct   | {both_correct:8d} | {base_only:8d}")
+print(f"Base wrong     | {ft_only:8d} | {both_wrong:8d}\n")
+
+b = base_only
+c = ft_only
+statistic = (abs(b - c) - 1)**2 / (b + c)
+p_value = chi2.sf(statistic, df=1)
+print("=== McNemar's Test ===")
+print(f"Chi‑square = {statistic:.3f}, p‑value = {p_value:.4e}\n")
+
+# =============================================================================
+# 4. Bootstrap confidence interval for improvement (overall)
+# =============================================================================
+n_iterations = 10000
+rng = np.random.default_rng(42)
+diffs = []
+for _ in range(n_iterations):
+    idx = rng.choice(N, size=N, replace=True)
+    boot_base = df['base_correct'].iloc[idx].mean()
+    boot_ft = df['ft_correct'].iloc[idx].mean()
+    diffs.append(boot_ft - boot_base)
+
+ci_lower = np.percentile(diffs, 2.5)
+ci_upper = np.percentile(diffs, 97.5)
+print("=== Bootstrap 95% Confidence Interval (Overall) ===")
+print(f"Improvement 95% CI: [{ci_lower}, {ci_upper}]\n")
+
+# =============================================================================
+# 5. Per‑disease recall analysis
+# =============================================================================
+per_class = df.groupby('base_true_disease').agg(
+    total=('base_correct', 'count'),
+    base_recall=('base_correct', 'mean'),
+    ft_recall=('ft_correct', 'mean')
+).reset_index()
+per_class['improvement'] = per_class['ft_recall'] - per_class['base_recall']
+per_class = per_class[per_class['total'] > 4]
+
+# Sort for top/bottom
+per_class_sorted = per_class.sort_values('improvement', ascending=False)
+
+print("=== Per‑Disease Recall (Top 10 Improvements) ===")
+print(per_class_sorted[['base_true_disease', 'total', 'base_recall', 'ft_recall', 'improvement']].head(10).to_string(index=False))
+print("\n=== Per‑Disease Recall (Bottom 10 Degradations) ===")
+print(per_class_sorted[['base_true_disease', 'total', 'base_recall', 'ft_recall', 'improvement']].tail(10).to_string(index=False))
+
+# =============================================================================
+# 6. Aggregate per‑disease metrics
+# =============================================================================
+improved = (per_class['improvement'] > 0).sum()
+worsened = (per_class['improvement'] < 0).sum()
+unchanged = (per_class['improvement'] == 0).sum()
+total_diseases = len(per_class)
+
+print("\n=== Per‑Disease Summary ===")
+print(f"Total distinct diseases: {total_diseases}")
+print(f"Improved:  {improved} ({improved/total_diseases*100:.1f}%)")
+print(f"Worsened:  {worsened} ({worsened/total_diseases*100:.1f}%)")
+print(f"Unchanged: {unchanged} ({unchanged/total_diseases*100:.1f}%)")
+
+# Sign test (binomial test) for improved vs worsened (ignoring unchanged)
+if improved + worsened > 0:
+    psignarr = []
+    prob = [x/1000 for x in range(1,1000,1)]
+
+    for i in range(1, 1000, 1):
+        p_sign_itr = binomtest(improved, n = improved+worsened, p = i/1000)
+        psignarr.append(p_sign_itr.pvalue)
+
+    plt.plot(prob,psignarr)
+    plt.show()
+    print(f"Max sign test p value is {max(psignarr)} for probablity {prob[psignarr.index(max(psignarr))]}")
+    p_sign = binomtest(improved, n=improved+worsened, p=0.1)
+    p_sign_1 = binomtest(improved, n=improved+worsened, p=0.5)
+    p_sign_2 = binomtest(improved, n=improved+worsened, p=0.9)
+    print(f".1 Sign test p‑value (improved vs worsened): {p_sign.pvalue}")
+    print(f".5 Sign test p‑value (improved vs worsened): {p_sign_1.pvalue}")
+    print(f".9 Sign test p‑value (improved vs worsened): {p_sign_2.pvalue}")
+else:
+    print("No diseases changed.")
+
+# Unweighted average improvement
+unweighted_mean_improvement = per_class['improvement'].mean()
+print(f"Unweighted mean improvement per disease: {unweighted_mean_improvement:.4f}")
+
+# Bootstrap confidence interval for the unweighted mean improvement per disease
+n_boot = 10000
+mean_improvements = []
+for _ in range(n_boot):
+    boot_sample = per_class.sample(frac=1, replace=True)          # bootstrap the disease list
+    mean_improvements.append(boot_sample['improvement'].mean())
+
+ci_mean_lower, ci_mean_upper = np.percentile(mean_improvements, [2.5, 97.5])
+print(f"\nBootstrap 95% CI for mean improvement per disease: [{ci_mean_lower}, {ci_mean_upper}]")
+
+# Optional: median and its CI (more robust if there are extreme outliers)
+median_improvements = []
+for _ in range(n_boot):
+    boot_sample = per_class.sample(frac=1, replace=True)
+    median_improvements.append(boot_sample['improvement'].median())
+
+ci_med_lower, ci_med_upper = np.percentile(median_improvements, [2.5, 97.5])
+print(f"Bootstrap 95% CI for median improvement per disease: [{ci_med_lower}, {ci_med_upper}]")
+
+
+# Diseases with zero base recall but positive ft recall
+zero_base_pos_ft = per_class[(per_class['base_recall'] == 0) & (per_class['ft_recall'] > 0)]
+print(f"\nDiseases where base recall = 0, ft recall > 0 (count: {len(zero_base_pos_ft)}):")
+print(zero_base_pos_ft[['base_true_disease', 'total', 'ft_recall']].head(10).to_string(index=False))
+
+# Diseases with positive base recall but zero ft recall
+pos_base_zero_ft = per_class[(per_class['base_recall'] > 0) & (per_class['ft_recall'] == 0)]
+print(f"\nDiseases where base recall > 0, ft recall = 0 (count: {len(pos_base_zero_ft)}):")
+print(pos_base_zero_ft[['base_true_disease', 'total', 'base_recall']].head(10).to_string(index=False))
+
+# =============================================================================
+# 7. Bootstrap confidence interval for proportion of improved diseases
+# =============================================================================
+n_boot = 10000
+props = []
+for _ in range(n_boot):
+    boot = per_class.sample(frac=1, replace=True)
+    props.append((boot['improvement'] > 0).mean())
+ci_prop_lower, ci_prop_upper = np.percentile(props, [2.5, 97.5])
+print(f"\nBootstrap 95% CI for proportion of diseases improved: [{ci_prop_lower:.3f}, {ci_prop_upper:.3f}]")
+
+# =============================================================================
+# 8. Visualizations
+# =============================================================================
+sns.set_style('whitegrid')
+plt.rcParams['figure.figsize'] = (12, 6)
+
+# -----------------------------------------------------------------------------
+# 8.1 Stacked bar of outcome categories
+# -----------------------------------------------------------------------------
+categories = ['Both correct', 'Base only', 'FT only', 'Both wrong']
+counts = [both_correct, base_only, ft_only, both_wrong]
+colors = ['#2ecc71', '#f39c12', '#3498db', '#e74c3c']
+
+plt.figure()
+bars = plt.bar(categories, counts, color=colors)
+plt.title('Outcome Categories (Base vs Fine‑tuned)', fontsize=14)
+plt.ylabel('Number of samples')
+for bar, cnt in zip(bars, counts):
+    plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 5, str(cnt),
+             ha='center', va='bottom', fontweight='bold')
+plt.tight_layout()
+plt.show()
+# plt.savefig('outcome_categories.png', dpi=150)
+
+# -----------------------------------------------------------------------------
+# 8.2 Top N most improved diseases (horizontal bar chart)
+# -----------------------------------------------------------------------------
+min_samples = 5   # only include diseases with at least this many samples
+per_class_filt = per_class[per_class['total'] >= min_samples].copy()
+top_n = 15
+top_improved = per_class_filt.nlargest(top_n, 'improvement').sort_values('improvement')
+
+if len(top_improved) > 0:
+    plt.figure(figsize=(10, 8))
+    y_pos = np.arange(len(top_improved))
+    plt.barh(y_pos - 0.2, top_improved['base_recall'], height=0.4, label='Base', color='#f39c12')
+    plt.barh(y_pos + 0.2, top_improved['ft_recall'], height=0.4, label='Fine‑tuned', color='#3498db')
+    plt.yticks(y_pos, top_improved['base_true_disease'])
+    plt.xlabel('Recall')
+    plt.title(f'Top {top_n} Most Improved Diseases (≥{min_samples} samples)')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+    # plt.savefig('top_improved_diseases.png', dpi=150)
+else:
+    print("\nNot enough diseases with ≥5 samples for top improved plot.")
+
+# -----------------------------------------------------------------------------
+# 8.3 Scatter plot: base recall vs ft recall
+# -----------------------------------------------------------------------------
+plt.figure(figsize=(8, 8))
+sizes = per_class_filt['total'] * 10   # scale point size by number of samples
+sc = plt.scatter(per_class_filt['base_recall'], per_class_filt['ft_recall'],
+                 s=sizes, alpha=0.6, c=per_class_filt['improvement'], cmap='RdBu_r', edgecolors='k')
+plt.colorbar(sc, label='Improvement (FT - Base)')
+plt.plot([0, 1], [0, 1], 'k--', alpha=0.5, label='y=x')
+plt.xlabel('Base Recall')
+plt.ylabel('Fine‑tuned Recall')
+plt.title('Per‑Disease Recall: Base vs Fine‑tuned')
+plt.legend()
+plt.tight_layout()
+plt.show()
+# plt.savefig('recall_scatter.png', dpi=150)
+
+# -----------------------------------------------------------------------------
+# 8.4 Histogram of per‑disease improvements
+# -----------------------------------------------------------------------------
+plt.figure()
+
+plt.hist(per_class_filt['improvement'], bins=20, edgecolor='black', alpha=0.7, color='#2ecc71')
+plt.axvline(x=0, color='red', linestyle='--', label='No change')
+plt.xlabel('Improvement in Recall')
+plt.ylabel('Number of Diseases')
+plt.title('Distribution of Per‑Disease Recall Improvement')
+plt.legend()
+plt.tight_layout()
+plt.show()
+# plt.savefig('improvement_histogram.png', dpi=150)
+
+print("\nAnalysis complete. Review printed statistics and generated plots.")
